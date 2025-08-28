@@ -1,0 +1,986 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  EnvironmentName:
+    Description: An environment name that is prefixed to resource names.
+    Type: String
+    Default: msk-emr-serverless-pipeline
+
+  VpcCIDR:
+      Description: Please enter the IP range (CIDR notation) for this VPC
+      Type: String
+      Default: 10.192.0.0/16
+
+  PublicSubnet1CIDR:
+      Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+      Type: String
+      Default: 10.192.10.0/24
+
+  PublicSubnet2CIDR:
+      Description: Please enter the IP range (CIDR notation) for the public subnet in the second Availability Zone
+      Type: String
+      Default: 10.192.11.0/24
+
+  PrivateSubnet1CIDR:
+      Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+      Type: String
+      Default: 10.192.20.0/24
+
+  PrivateSubnet2CIDR:
+      Description: Please enter the IP range (CIDR notation) for the private subnet in the second Availability Zone
+      Type: String
+      Default: 10.192.21.0/24
+
+  InstanceType:
+    Description: MSK client EC2 instance type.
+    Type: String
+    Default: t2.micro
+    AllowedValues: [t2.nano, t2.micro, t2.small, t2.medium, t2.large, t2.xlarge, t2.2xlarge,
+      t3.nano, t3.micro, t3.small, t3.medium, t3.large, t3.xlarge, t3.2xlarge]
+    ConstraintDescription: must be a valid EC2 instance type.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: Latest AMI ID of Amazon Linux 2023 for ec2 instance. You can use the
+      default value.
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Subnet (AZ1)
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Subnet (AZ2)
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs  '' ]
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Subnet (AZ1)
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Subnet (AZ2)
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Routes (AZ1)
+
+  PrivateInternetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: "blog-msk-emr-serverless-sg"
+      GroupDescription: "Security group with a self-referencing inbound rule."
+      VpcId: !Ref VPC
+
+  SecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref SecurityGroup
+      Description: "Self referencing rule"
+
+  SecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: Allow all outbound traffic
+      GroupId: !Ref SecurityGroup
+      IpProtocol: "-1"
+      CidrIp: 0.0.0.0/0
+
+  BlogMSKServerlessCluster:
+    Type: 'AWS::MSK::ServerlessCluster'
+    Properties:
+      ClientAuthentication:
+        Sasl:
+          Iam:
+            Enabled: true
+      ClusterName: !Ref EnvironmentName
+      Tags:
+        Name: !Ref EnvironmentName
+      VpcConfigs:
+        - SecurityGroups:
+            - !Ref SecurityGroup
+          SubnetIds:
+            - !Ref PublicSubnet1
+            - !Ref PublicSubnet2  
+  
+  EC2Role: 
+    Type: AWS::IAM::Role
+    DependsOn: 
+      - SparkApplication 
+      - EMRServerlessJobRole
+    Properties:
+      RoleName: !Sub "msk-ec2client-Role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: '/'
+      ManagedPolicyArns: ["arn:aws:iam::aws:policy/AmazonSSMFullAccess"]
+      Policies:
+      - PolicyName: !Sub "mskserverlesscluster-readwrite-access-policy-${EnvironmentName}"
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - kafka-cluster:Connect
+              - kafka-cluster:AlterCluster
+              - kafka-cluster:DescribeCluster
+            Resource: [ !Ref BlogMSKServerlessCluster ]
+          - Effect: Allow
+            Action:
+              - kafka-cluster:CreateTopic
+              - kafka-cluster:DescribeTopic
+              - kafka-cluster:WriteData
+              - kafka-cluster:ReadData
+            Resource: [ !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:topic/${EnvironmentName}/*/*' ]
+          - Effect: Allow
+            Action:
+              - kafka-cluster:AlterGroup
+              - kafka-cluster:DescribeGroup
+            Resource: [ !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:group/${EnvironmentName}/*/*' ]
+      - PolicyName: !Sub "cfn-s3-emr-${EnvironmentName}"
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - s3:Get*
+              - s3:PutObject*
+              - s3:List*
+            Resource:
+
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref StreamingoutputS3Bucket
+
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref StreamingoutputS3Bucket
+                  - /*
+              
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref EMRSparkScriptBucket
+
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref EMRSparkScriptBucket
+                  - /*
+          - Effect: Allow
+            Action:
+              - emr-serverless:StartJobRun
+            Resource: [ !GetAtt SparkApplication.Arn  ]   
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource: [ !GetAtt EMRServerlessJobRole.Arn ] 
+        
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      InstanceProfileName: !Sub "msk-ec2client-Role-${EnvironmentName}"
+      Roles: 
+        - 
+          !Ref EC2Role
+
+  MSKClientEC2:
+    Type: AWS::EC2::Instance
+    DependsOn: EMRSparkScriptBucket
+    Properties:
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PublicSubnet1
+      ImageId: !Ref LatestAmiId
+      SecurityGroupIds: 
+       - !Ref SecurityGroup
+      Tags:
+        -
+          Key: Name
+          Value: !Ref AWS::StackName
+      UserData:
+        Fn::Base64: !Sub |
+            #!/bin/bash
+            sudo yum -y install java-11
+            cd /home/ec2-user
+            wget https://aws-blogs-artifacts-public.s3.amazonaws.com/artifacts/BDB-4406/pysparkStreamingBlog.py
+            wget https://aws-blogs-artifacts-public.s3.amazonaws.com/artifacts/BDB-4406/syntheticSalesDataProducer.py
+            aws s3 cp pysparkStreamingBlog.py s3://emrblogscript-${AWS::AccountId}-${AWS::Region}/emr_pyspark_streaming_script/
+            wget https://archive.apache.org/dist/kafka/2.8.1/kafka_2.12-2.8.1.tgz
+            tar -xzf kafka_2.12-2.8.1.tgz
+            cd kafka_2.12-2.8.1/libs
+            wget https://github.com/aws/aws-msk-iam-auth/releases/download/v1.1.1/aws-msk-iam-auth-1.1.1-all.jar
+            cd ../bin
+            echo "security.protocol=SASL_SSL" | sudo tee -a client.properties
+            echo "sasl.mechanism=AWS_MSK_IAM" | sudo tee -a client.properties
+            echo "sasl.jaas.config=software.amazon.msk.auth.iam.IAMLoginModule required;" | sudo tee -a client.properties
+            echo "sasl.client.callback.handler.class=software.amazon.msk.auth.iam.IAMClientCallbackHandler" | sudo tee -a client.properties
+            chown -R ec2-user:ec2-user /home/ec2-user/
+            sudo yum -y install libxcrypt-compat
+            sudo yum -y install python3-pip
+            sudo yum remove -y python3-requests
+            sudo pip3 install aws-msk-iam-sasl-signer-python==1.0.1 kafka-python==2.0.2 plotly==5.23.0 streamlit==1.37.1 awswrangler==3.9.1 streamlit_autorefresh==1.0.1
+            sudo dnf reinstall -y python-dateutil
+
+
+  StreamingoutputS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub emrblogstreaming-${AWS::AccountId}-output-bucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  EMRSparkScriptBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "emrblogscript-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  
+  ResourceCleanupFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "msk-cleanup-role-${EnvironmentName}"
+      ManagedPolicyArns:
+        -  "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: '/service-role/'
+      Policies:
+      - PolicyName: GluedeletedatabaseAccess
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                  - "glue:GetDatabase"
+                  - "glue:GetDataBases"
+                  - "glue:DeleteDatabase"
+              Resource: '*'
+      - PolicyName: EmrStopApplication
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                  - "emr-serverless:StopApplication"
+                  - "emr-serverless:GetApplication"
+              Resource: '*'
+      - PolicyName: !Sub "cfn-msk-s3cleanup-${EnvironmentName}"
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - iam:ListAttachedRolePolicies
+              - iam:DetachRolePolicy
+            Resource:
+              - !GetAtt EC2Role.Arn 
+          - Effect: Allow
+            Action:
+              - s3:Get*
+              - s3:Delete*
+              - s3:List*
+            Resource: 
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref StreamingoutputS3Bucket
+
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref StreamingoutputS3Bucket
+                  - /*
+
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref EMRSparkScriptBucket
+
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref EMRSparkScriptBucket
+                  - /*
+              
+      Tags: 
+        - Key: AppName
+          Value: !Sub '${EnvironmentName}-${AWS::StackName}'
+  
+  CleanupResourcesOnDeletion:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          import cfnresponse
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          def lambda_handler(event, context):
+            logger.info(event)
+            responseStatus = cfnresponse.SUCCESS
+            responseData = {}
+            iam_role = event['ResourceProperties'].get('IamRole')
+            bucket = event['ResourceProperties'].get('BucketName')
+            glue_database = event['ResourceProperties'].get('GlueDatabase')
+            application_id = event['ResourceProperties'].get('sparkApplicationID')
+            if bucket and event['RequestType'] == 'Delete':
+              try:
+                  s3 = boto3.resource('s3')
+                  bucket = s3.Bucket(bucket)
+                  delete_list = []
+                  for obj in bucket.objects.filter():
+                      delete_list.append({'Key': obj.key})
+                      # When we hit 1000 objects, delete them in batch
+                      if len(delete_list) == 1000:
+                          bucket.delete_objects(
+                              Delete={
+                                  'Objects': delete_list,
+                                  'Quiet': True
+                              }
+                          )
+                          delete_list = []
+                  
+                  # Delete any remaining objects
+                  if delete_list:
+                      bucket.delete_objects(
+                          Delete={
+                              'Objects': delete_list,
+                              'Quiet': True
+                          }
+                      )
+                  responseStatus = cfnresponse.SUCCESS
+              except Exception as e:
+                  logger.exception(e)
+                  responseStatus = cfnresponse.FAILED
+            if iam_role and event['RequestType'] == 'Delete':
+              try:
+                iam = boto3.client('iam')
+                attached_policies = iam.list_attached_role_policies(RoleName=iam_role)
+                for policy in attached_policies['AttachedPolicies']:
+                  iam.detach_role_policy(RoleName=iam_role, PolicyArn=policy['PolicyArn'])
+                responseStatus = cfnresponse.SUCCESS
+              except Exception as e:
+                logger.exception(e)
+                responseStatus = cfnresponse.FAILED
+            if glue_database and event['RequestType'] == 'Delete':
+              try:
+                glue_client = boto3.client('glue')
+                try:
+                    gluedbresponse = glue_client.get_database(Name=glue_database)
+                    # If the database exists, delete it
+                    if gluedbresponse['Database']:
+                        glue_client.delete_database(Name=glue_database)
+                except:
+                    print("do nothing")
+                responseStatus = cfnresponse.SUCCESS
+              except Exception as e:
+                logger.exception(e)
+                responseStatus = cfnresponse.FAILED
+            if application_id and event['RequestType'] == 'Delete':
+              try:
+                emr_serverless = boto3.client('emr-serverless')
+                app_state = emr_serverless.get_application(
+                    applicationId=application_id
+                )['application']['state']
+                
+                # Only stop if the application is STARTED
+                if app_state == 'STARTED':
+                    emrresponse = emr_serverless.stop_application(applicationId=application_id)
+                    responseStatus = cfnresponse.SUCCESS
+                else:
+                    print(f"Application is in {app_state} state. No stop action needed.")
+                    responseStatus = cfnresponse.SUCCESS
+              except Exception as e:
+                logger.exception(e)
+                responseStatus = cfnresponse.FAILED
+            cfnresponse.send(event, context, responseStatus, responseData)
+            return
+      FunctionName: !Sub "cfn-delete-resources-${EnvironmentName}"
+      Handler: index.lambda_handler
+      Role: !GetAtt ResourceCleanupFunctionExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 30
+
+  CleanupStreamingoutputS3BucketOnDelete:
+    Type: Custom::cleanups3bucket
+    Properties:
+      ServiceToken: !GetAtt CleanupResourcesOnDeletion.Arn 
+      BucketName: !Ref StreamingoutputS3Bucket
+
+  CleanupEMRSparkScriptBucketOnDelete:
+    Type: Custom::cleanups3bucket
+    Properties:
+      ServiceToken: !GetAtt CleanupResourcesOnDeletion.Arn 
+      BucketName: !Ref EMRSparkScriptBucket
+  
+  DeattachIamPolicy:
+    Type: Custom::deatchpolicy
+    Properties:
+      ServiceToken: !GetAtt CleanupResourcesOnDeletion.Arn 
+      IamRole: !Ref EC2Role
+
+  DeleteGlueDatabase:
+    Type: Custom::deletingdatabase
+    Properties:
+      ServiceToken: !GetAtt CleanupResourcesOnDeletion.Arn 
+      GlueDatabase: "emrblog"
+  
+  StopSparkApplication:
+    Type: Custom::stopsparkapplicationserverless
+    DependsOn: SparkApplication
+    Properties:
+      ServiceToken: !GetAtt CleanupResourcesOnDeletion.Arn 
+      sparkApplicationID: !Ref SparkApplication
+
+  BootstrapBrokersFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "emr-msk-getbroker-role-${EnvironmentName}"
+      ManagedPolicyArns:
+        -  "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: '/service-role/'
+      Policies:
+      - PolicyName: !Sub "cfn-msk-msk-brokers-policy-${EnvironmentName}"
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - kafka:GetBootstrapBrokers
+            Resource: !Ref BlogMSKServerlessCluster
+      - PolicyName: !Sub "cfn-ec2-subnet-describe-${EnvironmentName}"
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - ec2:DescribeSubnets
+            Resource: "*"
+      - PolicyName: !Sub "cfn-msk-s3-${EnvironmentName}"
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - s3:Get*
+              - s3:PutObject*
+              - s3:List*
+            Resource: 
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref StreamingoutputS3Bucket
+
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref StreamingoutputS3Bucket
+                  - /*
+
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref EMRSparkScriptBucket
+
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref EMRSparkScriptBucket
+                  - /*
+      Tags: 
+        - Key: AppName
+          Value: !Sub '${EnvironmentName}-${AWS::StackName}'
+            
+  BootstrapBrokersFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import cfnresponse
+          import boto3
+          session = boto3.session.Session()
+          client = session.client('kafka')
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+            
+          def lambda_handler(event, context):
+            logger.info(event)
+            responseStatus = cfnresponse.FAILED
+            responseData = {}
+            ClusterArn = event['ResourceProperties'].get('ClusterArn')
+            if ClusterArn:
+              try:
+                ClusterArn = event['ResourceProperties']['ClusterArn']
+                response = client.get_bootstrap_brokers(
+                    ClusterArn=ClusterArn
+                )
+                logger.info(response)
+                if (response['ResponseMetadata']['HTTPStatusCode'] == 200):
+                    responseStatus = cfnresponse.SUCCESS
+                    responseData['BootstrapBrokerStringSaslIam'] = response['BootstrapBrokerStringSaslIam']
+                
+              except Exception:
+                logger.exception('Signaling failure to CloudFormation.')
+            
+            cfnresponse.send(event, context, responseStatus, responseData)
+            return
+      FunctionName: !Sub "cfn-msk-bootstrap-brokers-${EnvironmentName}"
+      Handler: index.lambda_handler
+      Role: !GetAtt BootstrapBrokersFunctionExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 30
+
+  BootstrapBrokers:
+    Type: Custom::Function
+    Properties:
+      ServiceToken: !GetAtt BootstrapBrokersFunction.Arn
+      ClusterArn: !Ref BlogMSKServerlessCluster
+
+  # IAM resources
+  EMRStudioServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - elasticmapreduce.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "Service role for EMR Studio"
+      RoleName: AmazonEMR-ServiceRole-20230815012
+
+
+  EMRStudioServiceRolePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: EMRStudioServiceRolePolicy1
+      Roles:
+      - !Ref EMRStudioServiceRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEMRReadOnlyActions
+            Effect: Allow
+            Action:
+              - elasticmapreduce:ListInstances
+              - elasticmapreduce:DescribeCluster
+              - elasticmapreduce:ListSteps
+            Resource: '*'
+
+          - Sid: AllowEC2ENIActions
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterfacePermission
+              - ec2:DeleteNetworkInterface
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:*:*:network-interface/*'
+            
+
+          - Sid: AllowEC2ENIAttributeAction
+            Effect: Allow
+            Action:
+              - ec2:ModifyNetworkInterfaceAttribute
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:ec2:*:*:instance/*'
+              - !Sub 'arn:${AWS::Partition}:ec2:*:*:network-interface/*'
+              - !Sub 'arn:${AWS::Partition}:ec2:*:*:security-group/*'
+
+          - Sid: AllowEC2SecurityGroupActions
+            Effect: Allow
+            Action:
+              - ec2:AuthorizeSecurityGroupEgress
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupEgress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:DeleteNetworkInterfacePermission
+            Resource: '*'
+
+
+          - Sid: AllowEC2ENICreation
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:*:*:network-interface/*'
+            
+
+          - Sid: AllowEC2ENICreationInSubnetAndSecurityGroup
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:ec2:*:*:subnet/*'
+              - !Sub 'arn:${AWS::Partition}:ec2:*:*:security-group/*'
+            
+
+          - Sid: AllowEC2ReadOnlyActions
+            Effect: Allow
+            Action:
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeTags
+              - ec2:DescribeInstances
+              - ec2:DescribeSubnets
+              - ec2:DescribeVpcs
+            Resource: '*'
+
+          - Sid: S3permission
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:GetEncryptionConfiguration
+              - s3:ListBucket
+              - s3:DeleteObject
+            Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref StreamingoutputS3Bucket
+
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref StreamingoutputS3Bucket
+                  - /*
+
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref EMRSparkScriptBucket
+
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref EMRSparkScriptBucket
+                  - /*
+ 
+
+  EMRStudioCreate:
+    Type: AWS::EMR::Studio
+    DependsOn: EMRStudioServiceRolePolicy
+    Properties:
+      AuthMode: IAM
+      DefaultS3Location: !Sub s3://${StreamingoutputS3Bucket}/EMRStudio
+      EngineSecurityGroupId: !Ref SecurityGroup
+      Name: EMRStudio-Streaming-Blog
+      ServiceRole: !GetAtt EMRStudioServiceRole.Arn
+      SubnetIds: 
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      VpcId: !Ref VPC
+      WorkspaceSecurityGroupId: !Ref SecurityGroup
+
+  # IAM resources
+  EMRServerlessJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - emr-serverless.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "Service role for EMR Studio"
+      RoleName: EMRServerless_Job_Execution_Role
+      Policies:
+        - PolicyName: GlueAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "glue:GetDatabase"
+                  - "glue:GetDataBases"
+                  - "glue:CreateTable"
+                  - "glue:GetTable"
+                  - "glue:GetTables"
+                  - "glue:GetPartition"
+                  - "glue:GetPartitions"
+                  - "glue:CreatePartition"
+                  - "glue:BatchCreatePartition"
+                  - "glue:GetUserDefinedFunctions"
+                  - "glue:CreateDatabase"
+                Resource: '*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                  - "s3:DeleteObject"
+                Resource:
+                  - !Sub 'arn:aws:s3:::${StreamingoutputS3Bucket}/*'
+        - PolicyName: !Sub "mskserverlesscluster-readwrite-access-policy-${EnvironmentName}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - kafka-cluster:Connect
+                - kafka-cluster:AlterCluster
+                - kafka-cluster:DescribeCluster
+              Resource: [ !Ref BlogMSKServerlessCluster ]
+            - Effect: Allow
+              Action:
+                - kafka-cluster:CreateTopic
+                - kafka-cluster:DescribeTopic
+                - kafka-cluster:WriteData
+                - kafka-cluster:ReadData
+              Resource: [ !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:topic/${EnvironmentName}/*/*' ]
+            - Effect: Allow
+              Action:
+                - kafka-cluster:AlterGroup
+                - kafka-cluster:DescribeGroup
+              Resource: [ !Sub 'arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:group/${EnvironmentName}/*/*' ]
+
+
+  SparkApplication:
+    Type: AWS::EMRServerless::Application
+    DependsOn: EMRStudioCreate
+    Properties:
+      Name: spark-streaming-app-emrblog
+      ReleaseLabel: emr-7.1.0
+      Type: Spark
+      MaximumCapacity:
+        Cpu: 200 vCPU
+        Memory: 100 GB
+      AutoStartConfiguration:
+        Enabled: true
+      AutoStopConfiguration:
+        Enabled: true
+        IdleTimeoutMinutes: 100
+      InitialCapacity:
+        - Key: Driver
+          Value:
+            WorkerCount: 3
+            WorkerConfiguration:
+              Cpu: 2 vCPU
+              Memory: 4 GB
+              Disk: 21 GB
+        - Key: Executor
+          Value:
+            WorkerCount: 4
+            WorkerConfiguration:
+              Cpu: 1 vCPU
+              Memory: 4 GB
+              Disk: 20 GB
+
+      NetworkConfiguration:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+
+Outputs:
+  InstanceId:
+    Description: InstanceId of the newly created Kafka EC2 instance.
+    Value: !Ref MSKClientEC2
+
+  BlogMSKServerlessClusterARN:
+    Description: MSKServerless Cluster 
+    Value: !Ref BlogMSKServerlessCluster
+
+  MSKBootstrapServers:
+    Description: MSKServerless cluster Bootstrap Servers string.
+    Value: !GetAtt BootstrapBrokers.BootstrapBrokerStringSaslIam
+
+  EMRServerlessJobRoleARN:
+    Value: !GetAtt EMRServerlessJobRole.Arn
+    Description: Job execution IAM Role ARN for EMR Serverless application.
+  
+  EmrBlogStreamingOutputBucketName:
+    Value: !Ref StreamingoutputS3Bucket
+    Description: Name of the Amazon S3 bucket used to write EMR Streaming job output.
+
+  EmrBlogScriptBucketName:
+    Value: !Ref EMRSparkScriptBucket
+    Description: Name of the Amazon S3 bucket contains EMR Streaming script.
+  
+  EmrServerlessSparkApplicationID:
+    Value: !Ref SparkApplication
+    Description: EMR serverless application Id.
+
+  EmrServerlessStudioID:
+    Value: !Ref EMRStudioCreate
+    Description: EMR serverless Studio ID.
+
+  EmrServerlessStudioURL:
+    Value: !GetAtt EMRStudioCreate.Url
+    Description: EMR serverless Studio URL.
